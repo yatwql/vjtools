@@ -54,7 +54,10 @@ import javax.management.remote.JMXServiceURL;
 import com.sun.management.HotSpotDiagnosticMXBean;
 import com.sun.management.OperatingSystemMXBean;
 import com.sun.management.ThreadMXBean;
+import com.sun.tools.attach.AgentInitializationException;
+import com.sun.tools.attach.AgentLoadException;
 import com.sun.tools.attach.VirtualMachine;
+import com.vip.vjtools.vjtop.util.Utils;
 
 @SuppressWarnings("restriction")
 public class JmxClient {
@@ -94,7 +97,7 @@ public class JmxClient {
 			JMXServiceURL jmxUrl = new JMXServiceURL(
 					"service:jmx:rmi://" + jmxHostAndPort + "/jndi/rmi://" + jmxHostAndPort + "/jmxrmi");
 			Map credentials = new HashMap(1);
-			String[] creds = new String[] { null, null };
+			String[] creds = new String[]{null, null};
 			credentials.put(JMXConnector.CREDENTIALS, creds);
 
 			this.jmxc = JMXConnectorFactory.connect(jmxUrl, credentials);
@@ -235,31 +238,58 @@ public class JmxClient {
 
 			// 3. 未启动，尝试启动
 			String home = vm.getSystemProperties().getProperty("java.home");
+			int version = Utils.getJavaMajorVersion(vm.getSystemProperties().getProperty("java.specification.version"));
 
-			// Normally in ${java.home}/jre/lib/management-agent.jar but might
-			// be in ${java.home}/lib in build environments.
-
-			String agentPath = home + File.separator + "jre" + File.separator + "lib" + File.separator
-					+ "management-agent.jar";
-			File f = new File(agentPath);
-			if (!f.exists()) {
-				agentPath = home + File.separator + "lib" + File.separator + "management-agent.jar";
-				f = new File(agentPath);
+			if (version >= 8) {
+				vm.startLocalManagementAgent();
+				agentProps = vm.getAgentProperties();
+				address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
+				if (address != null) {
+					return address;
+				}
+			} else {
+				// Normally in ${java.home}/jre/lib/management-agent.jar but might
+				// be in ${java.home}/lib in build environments.
+				String agentPath = home + File.separator + "jre" + File.separator + "lib" + File.separator
+						+ "management-agent.jar";
+				File f = new File(agentPath);
 				if (!f.exists()) {
-					throw new IOException("Management agent not found");
+					agentPath = home + File.separator + "lib" + File.separator + "management-agent.jar";
+					f = new File(agentPath);
+					if (!f.exists()) {
+						throw new IOException("Management agent not found");
+					}
+				}
+				agentPath = f.getCanonicalPath();
+				try {
+					vm.loadAgent(agentPath, "com.sun.management.jmxremote");
+				} catch (AgentLoadException x) {
+					// 高版本 attach 低版本jdk 抛异常：com.sun.tools.attach.AgentLoadException: 0，实际上是成功的;
+					// 根因： HotSpotVirtualMachine.loadAgentLibrary 高版本jdk实现不一样了
+					if (!"0".equals(x.getMessage())) {
+						IOException ioe = new IOException(x.getMessage());
+						ioe.initCause(x);
+						throw ioe;
+					}
+				} catch (AgentInitializationException x) {
+					IOException ioe = new IOException(x.getMessage());
+					ioe.initCause(x);
+					throw ioe;
+				}
+
+
+				// 4. 再次获取connector address
+				agentProps = vm.getAgentProperties();
+				address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
+
+				if (address == null) {
+					throw new IOException("Fails to find connector address");
 				}
 			}
 
-			agentPath = f.getCanonicalPath();
-			vm.loadAgent(agentPath, "com.sun.management.jmxremote");
-
-			// 4. 再次获取connector address
 			agentProps = vm.getAgentProperties();
 			address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
 
-			if (address == null) {
-				throw new IOException("Fails to find connector address");
-			}
 
 			return address;
 		} finally {
@@ -301,7 +331,7 @@ public class JmxClient {
 		public static SnapshotMBeanServerConnection newSnapshot(MBeanServerConnection mbsc) {
 			final InvocationHandler ih = new SnapshotInvocationHandler(mbsc);
 			return (SnapshotMBeanServerConnection) Proxy.newProxyInstance(Snapshot.class.getClassLoader(),
-					new Class[] { SnapshotMBeanServerConnection.class }, ih);
+					new Class[]{SnapshotMBeanServerConnection.class}, ih);
 		}
 	}
 
